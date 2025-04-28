@@ -51,7 +51,7 @@ def reset_database(message):
     cursor.execute("SET FOREIGN_KEY_CHECKS = 1;")
 
 
-    cursor.execute("UPDATE UserInfo SET balance = 3000")
+    cursor.execute("UPDATE UserInfo SET balance = 30000")
 
     connection.commit()
 
@@ -102,6 +102,7 @@ def init_purchase(message, product_id, order_id):
         purchase_product(message)
         return
 
+    print(db_utils.get_offer(connection, supplier_choice, product_id))
     base_price, discount, bulk_min_quantity = db_utils.get_offer(connection, supplier_choice, product_id)
 
     if qty >= bulk_min_quantity:
@@ -253,6 +254,8 @@ def init_product_return(message, sale_id):
         db_utils.add_product_to_warehouse(connection, product_id, qty)
 
         bot.send_message(chat_id, "Товар успешно возвращен", reply_markup=ui.main_menu())
+        db_utils.add_new_return(connection, sale_id, product_id, qty)
+        
     else:
         bot.send_message(chat_id, "Недостаточное количества товара в чеке или такого товара нет в чеке")
         message.text = str(sale_id)
@@ -276,7 +279,30 @@ def print_report(message):
         return
     
     for quartal in range(1, 5):
-        bot.send_message(chat_id, f"{quartal} квартал\n" + db_utils.get_financial_report_by_quartal(connection, year, quartal), parse_mode='Markdown', reply_markup=ui.main_menu())
+        bot.send_message(chat_id, f"{quartal} квартал\n" + db_utils.get_financial_report_by_quartal(connection, year, quartal), parse_mode='Markdown')
+    
+    bot.send_message(chat_id, "Итог по году\n" + db_utils.get_financial_report_by_year(connection, year), parse_mode='Markdown', reply_markup=ui.main_menu())
+    
+
+def sale_history(message):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, db_utils.get_sale_history(connection), parse_mode='Markdown')
+    bot.send_message(chat_id, "Введите id чека", reply_markup=ui.back_menu())
+    bot.register_next_step_handler(message, check_details)
+
+def check_details(message):
+    chat_id = message.chat.id
+    id = message.text.strip()
+    if not id.isdigit():
+        bot.send_message(chat_id, "Некорректный id чека")
+        sale_history(message)
+        return
+    id = int(id)
+    details = db_utils.get_sale_details(connection, id)
+    headers = ['Артикул', 'Название', 'Кол-во', 'Возвратный']
+    table = tabulate(details, headers, tablefmt='fancy_grid', floatfmt='.2f')
+    bot.send_message(chat_id, f"```\n{table}\n```", parse_mode='Markdown', reply_markup=ui.main_menu())
+    
     
 
 # Основной обработчик текстовых сообщений
@@ -299,7 +325,7 @@ def menu_handler(message):
         case 'состояние склада':
             bot.send_message(chat_id, db_utils.get_products_from_warehouse(connection), parse_mode='Markdown', reply_markup=ui.reports_menu())
         case 'удовлетворённые заказы':
-            bot.send_message(chat_id, db_utils.get_sale_history(connection), parse_mode='Markdown', reply_markup=ui.reports_menu())
+            sale_history(message)
         case 'финансовая картина':
             bot.send_message(chat_id, db_utils.get_financial_situation(connection), parse_mode='Markdown', reply_markup=ui.reports_menu())
         case 'фин. отчёт (квартал/год)':

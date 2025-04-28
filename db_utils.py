@@ -92,7 +92,7 @@ def get_offer(connection, seller_id, product_id):
     cursor.execute(f"""
         SELECT p.price, so.discount, so.bulk_min_quantity
         FROM SellerOffers AS so INNER JOIN Products AS p ON p.product_type_id = so.product_type_id
-        WHERE so.seller_id = {seller_id};
+        WHERE so.seller_id = {seller_id} AND p.product_id = {product_id};
         """)
     offer = cursor.fetchone()
     cursor.close()
@@ -281,45 +281,161 @@ def get_financial_report_by_quartal(connection, year, quartal):
     right_month = quartal * 3
     sql = f"""
     WITH
-    revenue AS (
-        SELECT 
-        MONTHNAME(s.sale_date) AS month,
-        SUM(sd.unit_price * r.quantity) AS rev
-        FROM Sales     s
-        JOIN SaleDetails sd ON s.sale_id = sd.sale_id
-        JOIN Returns     r ON r.sale_details_id = sd.sale_details_id
-        WHERE YEAR(s.sale_date) = {year}
-        AND MONTH(s.sale_date) BETWEEN {left_month} AND {right_month}
-        GROUP BY MONTHNAME(s.sale_date)
-    ),
+    months AS (
+    SELECT {left_month}   AS month UNION ALL
+    SELECT {left_month}+1 AS month UNION ALL
+    SELECT {right_month}  AS month
+  ),
 
-    cost AS (
-        SELECT
-        MONTHNAME(o.order_date) AS month,
-        SUM(od.quantity * od.unit_price * (1 - od.discount)) AS cst
-        FROM Orders       o
-        JOIN OrderDetails od ON o.order_id = od.order_id
-        WHERE YEAR(o.order_date) = {year}
-        AND MONTH(o.order_date) BETWEEN {left_month} AND {right_month}
-        GROUP BY MONTHNAME(o.order_date)
-    ),
-    
-    total AS (
-        SELECT revenue.month, rev, cst, rev - cst AS income
-        FROM revenue INNER JOIN cost ON revenue.month = cost.month
-        UNION ALL
-        SELECT
-        "Итог", SUM(rev), SUM(cst), SUM(rev - cst)
-        FROM revenue INNER JOIN cost ON revenue.month = cost.month
-    )
+  revenue AS (
+    SELECT
+      m.month,
+      MONTHNAME(
+        DATE_ADD('2000-01-01', INTERVAL m.month - 1 MONTH)
+      ) AS month_name,
+      COALESCE(SUM(sd.unit_price * sd.quantity), 0) AS rev
+    FROM months m
+    LEFT JOIN Sales        s  ON MONTH(s.sale_date) = m.month
+                              AND YEAR(s.sale_date) = {year}
+    LEFT JOIN SaleDetails  sd ON sd.sale_id = s.sale_id
+    GROUP BY m.month
+  ),
 
+  cost AS (
+    SELECT
+      m.month,
+      MONTHNAME(
+        DATE_ADD('2000-01-01', INTERVAL m.month - 1 MONTH)
+      ) AS month_name,
+      COALESCE(
+        SUM(od.quantity * od.unit_price * (1 - od.discount)),
+        0
+      ) AS cst
+    FROM months m
+    LEFT JOIN Orders       o  ON MONTH(o.order_date) = m.month
+                              AND YEAR(o.order_date) = {year}
+    LEFT JOIN OrderDetails od ON od.order_id = o.order_id
+    GROUP BY m.month
+  ),
 
-    SELECT * FROM total;
+  returns_cte AS (
+    SELECT
+      m.month,
+      MONTHNAME(
+        DATE_ADD('2000-01-01', INTERVAL m.month - 1 MONTH)
+      ) AS month_name,
+      COALESCE(
+        SUM(
+          COALESCE(p.price, 0) * COALESCE(rh.quantity, 0)
+        ),
+        0
+      ) AS returns_amount
+    FROM months m
+    LEFT JOIN ReturnsHistory rh
+      ON MONTH(rh.return_date) = m.month
+     AND YEAR(rh.return_date)  = {year}
+    LEFT JOIN Products p
+      ON p.product_id = rh.product_id
+    GROUP BY m.month
+  ),
+
+  total AS (
+    -- По-месячные данные
+    SELECT
+      r.month,
+      r.month_name,
+      r.rev,
+      c.cst,
+      rt.returns_amount,
+      r.rev - c.cst - rt.returns_amount AS income
+    FROM revenue     r
+    JOIN cost        c  ON c.month = r.month
+    JOIN returns_cte rt ON rt.month = r.month
+
+    UNION ALL
+
+    -- Итоговая строка
+    SELECT
+      13                 AS month,
+      'Итог'             AS month_name,
+      SUM(r.rev)         AS rev,
+      SUM(c.cst)         AS cst,
+      SUM(rt.returns_amount)    AS returns_amount,
+      SUM(r.rev - c.cst - rt.returns_amount) AS income
+    FROM revenue     r
+    JOIN cost        c  ON c.month = r.month
+    JOIN returns_cte rt ON rt.month = r.month
+  )
+
+    SELECT month_name, rev, cst, returns_amount, income
+    FROM total
+    ORDER BY month;
     """
 
     cursor.execute(sql)
-    headers = ['Месяц', 'Выручка', 'Издержки', 'Доход']
+    headers = ['Месяц', 'Выручка', 'Издержки', 'Возвраты', 'Доход']
     rows = cursor.fetchall()
     table = tabulate(rows, headers, tablefmt='fancy_grid', floatfmt='.2f')
     cursor.close()
     return f"```\n{table}\n```"
+
+def get_financial_report_by_year(connection, year):
+    sql = f"""
+    WITH
+    revenue AS (
+        SELECT
+        YEAR(s.sale_date) AS yr,
+        SUM(sd.unit_price * sd.quantity) AS rev
+        FROM Sales s
+        JOIN SaleDetails sd ON sd.sale_id = s.sale_id
+        WHERE YEAR(s.sale_date) = {year}
+        GROUP BY YEAR(s.sale_date)
+    ),
+    cost AS (
+        SELECT
+        YEAR(o.order_date) AS yr,
+        SUM(od.unit_price * od.quantity * (1-od.discount)) AS cst
+        FROM Orders o
+        JOIN OrderDetails od ON od.order_id = o.order_id
+        WHERE YEAR(o.order_date) = {year}
+        GROUP BY YEAR(o.order_date)
+    ),
+    returns_cte AS (
+        SELECT
+        YEAR(rh.return_date) AS yr,
+        SUM(COALESCE(p.price,0) * COALESCE(rh.quantity,0)) AS returns_amount
+        FROM ReturnsHistory rh
+        JOIN Products p ON p.product_id = rh.product_id
+        WHERE YEAR(rh.return_date) = {year}
+        GROUP BY YEAR(rh.return_date)
+    ),
+    total AS (
+        SELECT
+        r.rev,
+        c.cst,
+        rt.returns_amount,
+        r.rev - c.cst - rt.returns_amount AS income
+        FROM revenue     r
+        JOIN cost        c  ON c.yr = r.yr
+        JOIN returns_cte rt ON rt.yr = r.yr
+    )
+    SELECT rev, cst, returns_amount, income
+    FROM total;
+    """
+    cursor = connection.cursor()
+    cursor.execute(sql)
+    headers = ['Выручка', 'Издержки', 'Возвраты', 'Доход']
+    rows = cursor.fetchall()
+    table = tabulate(rows, headers, tablefmt='fancy_grid', floatfmt='.2f')
+    cursor.close()
+    return f"```\n{table}\n```"
+    
+
+def add_new_return(connection, sale_id, product_id, quantity):
+    cursor = connection.cursor()
+    cursor.execute(f"""
+        INSERT INTO ReturnsHistory (sale_id, product_id, return_date, quantity)
+        VALUES ({sale_id}, {product_id}, CURDATE(), {quantity});
+    """)
+    connection.commit()
+    cursor.close()
