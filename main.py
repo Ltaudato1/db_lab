@@ -83,7 +83,7 @@ def find_by_pk(conn, table, pk):
 @measure_time
 def find_by_value(conn, table, value):
     cur = conn.cursor()
-    cur.execute(f"SELECT * FROM `{table}` WHERE value = %s LIMIT 1", (value,))
+    cur.execute(f"SELECT * FROM `{table}` WHERE value = %s", (value,))
     row = cur.fetchone()
     cur.close()
     return row
@@ -91,7 +91,7 @@ def find_by_value(conn, table, value):
 @measure_time
 def find_by_mask(conn, table, mask):
     cur = conn.cursor()
-    cur.execute(f"SELECT * FROM `{table}` WHERE CAST(value AS CHAR) LIKE %s LIMIT 5", (mask,))
+    cur.execute(f"SELECT * FROM `{table}` WHERE CAST(value AS CHAR) LIKE %s", (mask,))
     rows = cur.fetchall()
     cur.close()
     return rows
